@@ -42,6 +42,12 @@
 #include <sstream>
 #include <signal.h>
 #include <stdlib.h>
+#include <linux/input.h>
+#include <linux/uinput.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "platform/os.h"
 #include "platform/util/StringUtils.h"
 #include "platform/threads/threads.h"
@@ -62,7 +68,7 @@ int                  g_cecLogLevel(-1);
 int                  g_cecDefaultLogLevel(CEC_LOG_ALL);
 std::ofstream        g_logOutput;
 bool                 g_bShortLog(false);
-std::string          g_strPort;
+std::string          g_strPort = "Amlogic";
 bool                 g_bSingleCommand(false);
 bool                 g_bExit(false);
 bool                 g_bHardExit(false);
@@ -72,6 +78,8 @@ ICECAdapter*         g_parser;
 bool                 g_cursesEnable(false);
 CCursesControl        g_cursesControl("1", "0");
 #endif
+
+int g_kbd;
 
 class CReconnect : public PLATFORM::CThread
 {
@@ -209,13 +217,143 @@ int CecLogMessage(void *UNUSED(cbParam), const cec_log_message message)
   return 0;
 }
 
-int CecKeyPress(void *UNUSED(cbParam), const cec_keypress UNUSED(key))
+#define fatal(msg...) { \
+        fprintf(stderr, msg); \
+        fprintf(stderr, " [%s(), %s:%u]\n", __FUNCTION__, __FILE__, __LINE__); \
+        exit(1); \
+        }
+
+int create_input_fd()
 {
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        fatal("Cannot open /dev/uinput");
+    }
+    if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) {
+        fatal("UI_SET_EVBIT");
+    }
+    for (int i = 0 ; i < 256 ; i++) {
+        if (ioctl(fd, UI_SET_KEYBIT, i) < 0) {
+            fatal("UI_SET_KEYBIT");
+        }
+    }
+    struct uinput_user_dev uidev;
+    memset(&uidev, 0, sizeof(uidev));
+    snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "xakcop kbd");
+    uidev.id.bustype = BUS_USB;
+    uidev.id.vendor  = 0xdead;
+    uidev.id.product = 0xbeef;
+    uidev.id.version = 1;
+    if (write(fd, &uidev, sizeof(uidev)) < 0) {
+        fatal("cannot write to /dev/uinput");
+    }
+    if (ioctl(fd, UI_DEV_CREATE) < 0) {
+        fatal("UI_DEV_CREATE");
+    }
+    return fd;
+}
+
+void emit(int type, int code, int val)
+{
+    struct input_event ie;
+
+    ie.type = type;
+    ie.code = code;
+    ie.value = val;
+    /* timestamp values below are ignored */
+    ie.time.tv_sec = 0;
+    ie.time.tv_usec = 0;
+
+    write(g_kbd, &ie, sizeof(ie));
+}
+
+int CecKeyPress(void *UNUSED(cbParam), const cec_keypress key)
+{
+  int code = 0;
+  switch (key.keycode) {
+      case CEC_USER_CONTROL_CODE_SELECT:
+          printf("+++ Pressing Enter\n");
+          code = KEY_ENTER;
+          break;
+      case CEC_USER_CONTROL_CODE_UP:
+          printf("+++ Pressing UP\n");
+          code = KEY_UP;
+          break;
+      case CEC_USER_CONTROL_CODE_DOWN:
+          printf("+++ Pressing DOWN\n");
+          code = KEY_DOWN;
+          break;
+      case CEC_USER_CONTROL_CODE_LEFT:
+          printf("+++ Pressing LEFT\n");
+          code = KEY_LEFT;
+          break;
+      case CEC_USER_CONTROL_CODE_RIGHT:
+          printf("+++ Pressing RIGHT\n");
+          code = KEY_RIGHT;
+          break;
+      case CEC_USER_CONTROL_CODE_EXIT:
+          printf("+++ Pressing EXIT\n");
+          code = KEY_ESC;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER0:
+          printf("+++ Pressing 0\n");
+          code = KEY_0;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER1:
+          printf("+++ Pressing 1\n");
+          code = KEY_1;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER2:
+          printf("+++ Pressing 2\n");
+          code = KEY_2;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER3:
+          printf("+++ Pressing 3\n");
+          code = KEY_3;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER4:
+          printf("+++ Pressing 4\n");
+          code = KEY_4;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER5:
+          printf("+++ Pressing 5\n");
+          code = KEY_5;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER6:
+          printf("+++ Pressing 6\n");
+          code = KEY_6;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER7:
+          printf("+++ Pressing 7\n");
+          code = KEY_7;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER8:
+          printf("+++ Pressing 8\n");
+          code = KEY_8;
+          break;
+      case CEC_USER_CONTROL_CODE_NUMBER9:
+          printf("+++ Pressing 9\n");
+          code = KEY_9;
+          break;
+      default:
+          return 0;
+  }
+  emit(EV_KEY, code, 1);
+  emit(EV_SYN, SYN_REPORT, 0);
+  emit(EV_KEY, code, 0);
+  emit(EV_SYN, SYN_REPORT, 0);
   return 0;
 }
 
-int CecCommand(void *UNUSED(cbParam), const cec_command UNUSED(command))
+int CecCommand(void *UNUSED(cbParam), const cec_command command)
 {
+  if (command.opcode == CEC_OPCODE_STANDBY) {
+      printf("+++ Pressing F11\n");
+      emit(EV_KEY, KEY_F11, 1);
+      emit(EV_SYN, SYN_REPORT, 0);
+      emit(EV_KEY, KEY_F11, 0);
+      emit(EV_SYN, SYN_REPORT, 0);
+  }
   return 0;
 }
 
@@ -1240,10 +1378,12 @@ int main (int argc, char *argv[])
     PrintToStdOut("can't register sighandler");
     return -1;
   }
+  g_kbd = create_input_fd();
+  printf("Created input fd=%d\n", g_kbd);
 
   g_config.Clear();
   g_callbacks.Clear();
-  snprintf(g_config.strDeviceName, 13, "CECTester");
+  snprintf(g_config.strDeviceName, 13, "STB");
   g_config.clientVersion       = LIBCEC_VERSION_CURRENT;
   g_config.bActivateSource     = 0;
   g_callbacks.CBCecLogMessage  = &CecLogMessage;
@@ -1289,37 +1429,6 @@ int main (int argc, char *argv[])
     strLog = StringUtils::Format("CEC Parser created - libCEC version %s", g_parser->VersionToString(g_config.serverVersion).c_str());
     std::cout << strLog.c_str() << std::endl;
 
-    //make stdin non-blocking
-  #ifndef __WINDOWS__
-    int flags = fcntl(0, F_GETFL, 0);
-    flags |= O_NONBLOCK;
-    fcntl(0, F_SETFL, flags);
-  #endif
-  }
-
-  if (g_strPort.empty())
-  {
-    if (!g_bSingleCommand)
-      std::cout << "no serial port given. trying autodetect: ";
-    cec_adapter devices[10];
-    uint8_t iDevicesFound = g_parser->FindAdapters(devices, 10, NULL);
-    if (iDevicesFound <= 0)
-    {
-      if (g_bSingleCommand)
-        std::cout << "autodetect ";
-      std::cout << "FAILED" << std::endl;
-      UnloadLibCec(g_parser);
-      return 1;
-    }
-    else
-    {
-      if (!g_bSingleCommand)
-      {
-        std::cout << std::endl << " path:     " << devices[0].path << std::endl <<
-            " com port: " << devices[0].comm << std::endl << std::endl;
-      }
-      g_strPort = devices[0].comm;
-    }
   }
 
   PrintToStdOut("opening a connection to the CEC adapter...");
@@ -1331,46 +1440,10 @@ int main (int argc, char *argv[])
     return 1;
   }
 
-#if defined(HAVE_CURSES_API)
-  if (g_cursesEnable)
-    g_cursesControl.Init();
-#endif
-
-  if (!g_bSingleCommand)
-    PrintToStdOut("waiting for input");
+  g_parser->PowerOnDevices((cec_logical_address) 0);
 
   while (!g_bExit && !g_bHardExit)
   {
-    std::string input;
-#if defined(HAVE_CURSES_API)
-    if (!g_cursesEnable) {
-      getline(std::cin, input);
-      std::cin.clear();
-    }
-    else
-    {
-      input = g_cursesControl.ParseCursesKey();
-    }
-#else
-    getline(std::cin, input);
-    std::cin.clear();
-#endif
-
-    if (ProcessConsoleCommand(g_parser, input) && !g_bSingleCommand && !g_bExit && !g_bHardExit)
-    {
-      if (!input.empty())
-        PrintToStdOut("waiting for input");
-    }
-    else
-    {
-#if defined(HAVE_CURSES_API)
-      if (g_cursesEnable)
-        g_cursesControl.End();
-#endif
-      g_bExit = true;
-    }
-
-    if (!g_bExit && !g_bHardExit)
       CEvent::Sleep(50);
   }
 
