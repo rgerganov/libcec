@@ -1467,7 +1467,7 @@ int main (int argc, char *argv[])
     return 1;
   }
 
-  g_parser->PowerOnDevices((cec_logical_address) 0);
+  //g_parser->PowerOnDevices((cec_logical_address) 0);
 
   while (!g_bExit && !g_bHardExit)
   {
